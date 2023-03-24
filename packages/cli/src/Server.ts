@@ -15,7 +15,6 @@ import { exec as callbackExec } from 'child_process';
 import { access as fsAccess } from 'fs/promises';
 import os from 'os';
 import { join as pathJoin, resolve as pathResolve } from 'path';
-import { createHmac } from 'crypto';
 import { promisify } from 'util';
 import cookieParser from 'cookie-parser';
 import express from 'express';
@@ -23,14 +22,9 @@ import { engine as expressHandlebars } from 'express-handlebars';
 import type { ServeStaticOptions } from 'serve-static';
 import type { FindManyOptions } from 'typeorm';
 import { Not, In } from 'typeorm';
-import type { AxiosRequestConfig } from 'axios';
-import axios from 'axios';
-import type { RequestOptions } from 'oauth-1.0a';
-import clientOAuth1 from 'oauth-1.0a';
 
 import {
 	BinaryDataManager,
-	Credentials,
 	LoadNodeParameterOptions,
 	LoadNodeListSearch,
 	UserSettings,
@@ -39,13 +33,11 @@ import {
 
 import type {
 	INodeCredentials,
-	INodeCredentialsDetails,
 	INodeListSearchResult,
 	INodeParameters,
 	INodePropertyOptions,
 	INodeTypeNameVersion,
 	ITelemetrySettings,
-	WorkflowExecuteMode,
 	ICredentialTypes,
 	ExecutionStatus,
 	IExecutionsSummary,
@@ -67,18 +59,15 @@ import {
 	GENERATED_STATIC_DIR,
 	inDevelopment,
 	N8N_VERSION,
-	RESPONSE_ERROR_MESSAGES,
 	TEMPLATES_DIR,
 } from '@/constants';
 import { credentialsController } from '@/credentials/credentials.controller';
-import { oauth2CredentialController } from '@/credentials/oauth2Credential.api';
 import type {
 	BinaryDataRequest,
 	CurlHelper,
 	ExecutionRequest,
 	NodeListSearchRequest,
 	NodeParameterOptionsRequest,
-	OAuthRequest,
 	WorkflowRequest,
 } from '@/requests';
 import { registerController } from '@/decorators';
@@ -88,6 +77,8 @@ import {
 	MeController,
 	NodesController,
 	NodeTypesController,
+	OAuth1CredentialController,
+	OAuth2CredentialController,
 	OwnerController,
 	PasswordResetController,
 	TagsController,
@@ -108,18 +99,12 @@ import {
 import { UserManagementMailer } from '@/UserManagement/email';
 import * as Db from '@/Db';
 import type {
-	ICredentialsDb,
 	ICredentialsOverwrite,
 	IDiagnosticInfo,
 	IExecutionFlattedDb,
 	IExecutionsStopData,
 } from '@/Interfaces';
 import { ActiveExecutions } from '@/ActiveExecutions';
-import {
-	CredentialsHelper,
-	getCredentialForUser,
-	getCredentialWithoutUser,
-} from '@/CredentialsHelper';
 import { CredentialsOverwrites } from '@/CredentialsOverwrites';
 import { CredentialTypes } from '@/CredentialTypes';
 import { LoadNodesAndCredentials } from '@/LoadNodesAndCredentials';
@@ -406,6 +391,8 @@ class Server extends AbstractServer {
 			new AuthController({ config, internalHooks, repositories, logger, postHog }),
 			new OwnerController({ config, internalHooks, repositories, logger }),
 			new MeController({ externalHooks, internalHooks, repositories, logger }),
+			new OAuth1CredentialController(config, logger, externalHooks, repositories.Credentials),
+			new OAuth2CredentialController(config, logger, externalHooks, repositories.Credentials),
 			new NodeTypesController({ config, nodeTypes }),
 			new PasswordResetController({
 				config,
@@ -755,252 +742,6 @@ class Server extends AbstractServer {
 				},
 			),
 		);
-
-		// ----------------------------------------
-		// OAuth1-Credential/Auth
-		// ----------------------------------------
-
-		// Authorize OAuth Data
-		this.app.get(
-			`/${this.restEndpoint}/oauth1-credential/auth`,
-			ResponseHelper.send(async (req: OAuthRequest.OAuth1Credential.Auth): Promise<string> => {
-				const { id: credentialId } = req.query;
-
-				if (!credentialId) {
-					LoggerProxy.error('OAuth1 credential authorization failed due to missing credential ID');
-					throw new ResponseHelper.BadRequestError('Required credential ID is missing');
-				}
-
-				const credential = await getCredentialForUser(credentialId, req.user);
-
-				if (!credential) {
-					LoggerProxy.error(
-						'OAuth1 credential authorization failed because the current user does not have the correct permissions',
-						{ userId: req.user.id },
-					);
-					throw new ResponseHelper.NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
-				}
-
-				let encryptionKey: string;
-				try {
-					encryptionKey = await UserSettings.getEncryptionKey();
-				} catch (error) {
-					throw new ResponseHelper.InternalServerError(error.message);
-				}
-
-				const mode: WorkflowExecuteMode = 'internal';
-				const timezone = config.getEnv('generic.timezone');
-				const credentialsHelper = new CredentialsHelper(encryptionKey);
-				const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-					credential as INodeCredentialsDetails,
-					credential.type,
-					mode,
-					timezone,
-					true,
-				);
-
-				const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
-					decryptedDataOriginal,
-					credential.type,
-					mode,
-					timezone,
-				);
-
-				const signatureMethod = oauthCredentials.signatureMethod as string;
-
-				const oAuthOptions: clientOAuth1.Options = {
-					consumer: {
-						key: oauthCredentials.consumerKey as string,
-						secret: oauthCredentials.consumerSecret as string,
-					},
-					signature_method: signatureMethod,
-					// eslint-disable-next-line @typescript-eslint/naming-convention
-					hash_function(base, key) {
-						const algorithm = signatureMethod === 'HMAC-SHA1' ? 'sha1' : 'sha256';
-						return createHmac(algorithm, key).update(base).digest('base64');
-					},
-				};
-
-				const oauthRequestData = {
-					oauth_callback: `${WebhookHelpers.getWebhookBaseUrl()}${
-						this.restEndpoint
-					}/oauth1-credential/callback?cid=${credentialId}`,
-				};
-
-				await this.externalHooks.run('oauth1.authenticate', [oAuthOptions, oauthRequestData]);
-
-				// eslint-disable-next-line new-cap
-				const oauth = new clientOAuth1(oAuthOptions);
-
-				const options: RequestOptions = {
-					method: 'POST',
-					url: oauthCredentials.requestTokenUrl as string,
-					data: oauthRequestData,
-				};
-
-				const data = oauth.toHeader(oauth.authorize(options));
-
-				// @ts-ignore
-				options.headers = data;
-
-				const { data: response } = await axios.request(options as Partial<AxiosRequestConfig>);
-
-				// Response comes as x-www-form-urlencoded string so convert it to JSON
-
-				const paramsParser = new URLSearchParams(response);
-
-				const responseJson = Object.fromEntries(paramsParser.entries());
-
-				const returnUri = `${oauthCredentials.authUrl}?oauth_token=${responseJson.oauth_token}`;
-
-				// Encrypt the data
-				const credentials = new Credentials(
-					credential as INodeCredentialsDetails,
-					credential.type,
-					credential.nodesAccess,
-				);
-
-				credentials.setData(decryptedDataOriginal, encryptionKey);
-				const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
-
-				// Add special database related data
-				newCredentialsData.updatedAt = new Date();
-
-				// Update the credentials in DB
-				await Db.collections.Credentials.update(credentialId, newCredentialsData);
-
-				LoggerProxy.verbose('OAuth1 authorization successful for new credential', {
-					userId: req.user.id,
-					credentialId,
-				});
-
-				return returnUri;
-			}),
-		);
-
-		// Verify and store app code. Generate access tokens and store for respective credential.
-		this.app.get(
-			`/${this.restEndpoint}/oauth1-credential/callback`,
-			async (req: OAuthRequest.OAuth1Credential.Callback, res: express.Response) => {
-				try {
-					const { oauth_verifier, oauth_token, cid: credentialId } = req.query;
-
-					if (!oauth_verifier || !oauth_token) {
-						const errorResponse = new ResponseHelper.ServiceUnavailableError(
-							`Insufficient parameters for OAuth1 callback. Received following query parameters: ${JSON.stringify(
-								req.query,
-							)}`,
-						);
-						LoggerProxy.error(
-							'OAuth1 callback failed because of insufficient parameters received',
-							{
-								userId: req.user?.id,
-								credentialId,
-							},
-						);
-						return ResponseHelper.sendErrorResponse(res, errorResponse);
-					}
-
-					const credential = await getCredentialWithoutUser(credentialId);
-
-					if (!credential) {
-						LoggerProxy.error('OAuth1 callback failed because of insufficient user permissions', {
-							userId: req.user?.id,
-							credentialId,
-						});
-						const errorResponse = new ResponseHelper.NotFoundError(
-							RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL,
-						);
-						return ResponseHelper.sendErrorResponse(res, errorResponse);
-					}
-
-					let encryptionKey: string;
-					try {
-						encryptionKey = await UserSettings.getEncryptionKey();
-					} catch (error) {
-						throw new ResponseHelper.InternalServerError(error.message);
-					}
-
-					const mode: WorkflowExecuteMode = 'internal';
-					const timezone = config.getEnv('generic.timezone');
-					const credentialsHelper = new CredentialsHelper(encryptionKey);
-					const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-						credential as INodeCredentialsDetails,
-						credential.type,
-						mode,
-						timezone,
-						true,
-					);
-					const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
-						decryptedDataOriginal,
-						credential.type,
-						mode,
-						timezone,
-					);
-
-					const options: AxiosRequestConfig = {
-						method: 'POST',
-						url: oauthCredentials.accessTokenUrl as string,
-						params: {
-							oauth_token,
-							oauth_verifier,
-						},
-					};
-
-					let oauthToken;
-
-					try {
-						oauthToken = await axios.request(options);
-					} catch (error) {
-						LoggerProxy.error('Unable to fetch tokens for OAuth1 callback', {
-							userId: req.user?.id,
-							credentialId,
-						});
-						const errorResponse = new ResponseHelper.NotFoundError('Unable to get access tokens!');
-						return ResponseHelper.sendErrorResponse(res, errorResponse);
-					}
-
-					// Response comes as x-www-form-urlencoded string so convert it to JSON
-
-					const paramParser = new URLSearchParams(oauthToken.data);
-
-					const oauthTokenJson = Object.fromEntries(paramParser.entries());
-
-					decryptedDataOriginal.oauthTokenData = oauthTokenJson;
-
-					const credentials = new Credentials(
-						credential as INodeCredentialsDetails,
-						credential.type,
-						credential.nodesAccess,
-					);
-					credentials.setData(decryptedDataOriginal, encryptionKey);
-					const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
-					// Add special database related data
-					newCredentialsData.updatedAt = new Date();
-					// Save the credentials in DB
-					await Db.collections.Credentials.update(credentialId, newCredentialsData);
-
-					LoggerProxy.verbose('OAuth1 callback successful for new credential', {
-						userId: req.user?.id,
-						credentialId,
-					});
-					res.sendFile(pathResolve(TEMPLATES_DIR, 'oauth-callback.html'));
-				} catch (error) {
-					LoggerProxy.error('OAuth1 callback failed because of insufficient user permissions', {
-						userId: req.user?.id,
-						credentialId: req.query.cid,
-					});
-					// Error response
-					return ResponseHelper.sendErrorResponse(res, error);
-				}
-			},
-		);
-
-		// ----------------------------------------
-		// OAuth2-Credential
-		// ----------------------------------------
-
-		this.app.use(`/${this.restEndpoint}/oauth2-credential`, oauth2CredentialController);
 
 		// ----------------------------------------
 		// Executions

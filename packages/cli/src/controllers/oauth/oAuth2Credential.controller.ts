@@ -1,87 +1,79 @@
 import ClientOAuth2 from 'client-oauth2';
 import Csrf from 'csrf';
-import express from 'express';
+import { Response } from 'express';
+import { Repository } from 'typeorm';
 import get from 'lodash.get';
 import omit from 'lodash.omit';
 import set from 'lodash.set';
 import split from 'lodash.split';
 import unset from 'lodash.unset';
+import { resolve } from 'path';
 import { Credentials, UserSettings } from 'n8n-core';
 import type {
-	WorkflowExecuteMode,
-	INodeCredentialsDetails,
 	ICredentialsEncrypted,
+	INodeCredentialsDetails,
+	WorkflowExecuteMode,
 } from 'n8n-workflow';
-import { LoggerProxy } from 'n8n-workflow';
-import { resolve as pathResolve } from 'path';
-
-import * as Db from '@/Db';
-import * as ResponseHelper from '@/ResponseHelper';
-import type { ICredentialsDb } from '@/Interfaces';
+import { ILogger } from 'n8n-workflow';
 import { RESPONSE_ERROR_MESSAGES, TEMPLATES_DIR } from '@/constants';
+import { Config } from '@/config';
+import { Get, RestController } from '@/decorators';
 import {
 	CredentialsHelper,
 	getCredentialForUser,
 	getCredentialWithoutUser,
 } from '@/CredentialsHelper';
-import { getLogger } from '@/Logger';
-import type { OAuthRequest } from '@/requests';
-import { ExternalHooks } from '@/ExternalHooks';
-import config from '@/config';
+import { OAuthRequest } from '@/requests';
 import { getInstanceBaseUrl } from '@/UserManagement/UserManagementHelper';
-import { Container } from 'typedi';
+import { BadRequestError, InternalServerError, NotFoundError } from '@/ResponseHelper';
+import { IExternalHooksClass } from '@/Interfaces';
+import type { ICredentialsDb } from '@/Interfaces';
 
-export const oauth2CredentialController = express.Router();
+@RestController('/oauth2-credential')
+export class OAuth2CredentialController {
+	private baseUrl: string;
 
-/**
- * Initialize Logger if needed
- */
-oauth2CredentialController.use((req, res, next) => {
-	try {
-		LoggerProxy.getInstance();
-	} catch (error) {
-		LoggerProxy.init(getLogger());
+	constructor(
+		private config: Config,
+		private logger: ILogger,
+		private externalHooks: IExternalHooksClass,
+		private credentialsRepository: Repository<ICredentialsDb>,
+	) {
+		this.baseUrl = `${getInstanceBaseUrl()}/${config.getEnv('endpoints.rest')}/oauth2-credential`;
 	}
-	next();
-});
 
-const restEndpoint = config.getEnv('endpoints.rest');
-
-/**
- * GET /oauth2-credential/auth
- *
- * Authorize OAuth Data
- */
-oauth2CredentialController.get(
-	'/auth',
-	ResponseHelper.send(async (req: OAuthRequest.OAuth1Credential.Auth): Promise<string> => {
+	/**
+	 * Get Authorization url
+	 */
+	@Get('/auth')
+	async getAuthUri(req: OAuthRequest.OAuth2Credential.Auth): Promise<string> {
 		const { id: credentialId } = req.query;
 
 		if (!credentialId) {
-			throw new ResponseHelper.BadRequestError('Required credential ID is missing');
+			throw new BadRequestError('Required credential ID is missing');
 		}
 
 		const credential = await getCredentialForUser(credentialId, req.user);
 
 		if (!credential) {
-			LoggerProxy.error('Failed to authorize OAuth2 due to lack of permissions', {
+			this.logger.error('Failed to authorize OAuth2 due to lack of permissions', {
 				userId: req.user.id,
 				credentialId,
 			});
-			throw new ResponseHelper.NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
+			throw new NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
 		}
 
 		let encryptionKey: string;
 		try {
 			encryptionKey = await UserSettings.getEncryptionKey();
 		} catch (error) {
-			throw new ResponseHelper.InternalServerError((error as Error).message);
+			throw new InternalServerError((error as Error).message);
 		}
 
 		const credentialType = (credential as unknown as ICredentialsEncrypted).type;
 
 		const mode: WorkflowExecuteMode = 'internal';
-		const timezone = config.getEnv('generic.timezone');
+		const timezone = this.config.getEnv('generic.timezone');
 		const credentialsHelper = new CredentialsHelper(encryptionKey);
 		const decryptedDataOriginal = await credentialsHelper.getDecrypted(
 			credential as INodeCredentialsDetails,
@@ -124,12 +116,12 @@ oauth2CredentialController.get(
 			clientSecret: get(oauthCredentials, 'clientSecret', '') as string,
 			accessTokenUri: get(oauthCredentials, 'accessTokenUrl', '') as string,
 			authorizationUri: get(oauthCredentials, 'authUrl', '') as string,
-			redirectUri: `${getInstanceBaseUrl()}/${restEndpoint}/oauth2-credential/callback`,
+			redirectUri: `${this.baseUrl}/callback`,
 			scopes: split(get(oauthCredentials, 'scope', 'openid,') as string, ','),
 			state: stateEncodedStr,
 		};
 
-		await Container.get(ExternalHooks).run('oauth2.authenticate', [oAuthOptions]);
+		await this.externalHooks.run('oauth2.authenticate', [oAuthOptions]);
 
 		const oAuthObj = new ClientOAuth2(oAuthOptions);
 
@@ -148,7 +140,7 @@ oauth2CredentialController.get(
 		newCredentialsData.updatedAt = new Date();
 
 		// Update the credentials in DB
-		await Db.collections.Credentials.update(req.query.id, newCredentialsData);
+		await this.credentialsRepository.update(req.query.id, newCredentialsData);
 
 		const authQueryParameters = get(oauthCredentials, 'authQueryParameters', '') as string;
 		let returnUri = oAuthObj.code.getUri();
@@ -165,32 +157,25 @@ oauth2CredentialController.get(
 			returnUri += `&${authQueryParameters}`;
 		}
 
-		LoggerProxy.verbose('OAuth2 authentication successful for new credential', {
+		this.logger.verbose('OAuth2 authentication successful for new credential', {
 			userId: req.user.id,
 			credentialId,
 		});
+
 		return returnUri;
-	}),
-);
+	}
 
-const renderCallbackError = (res: express.Response, errorMessage: string) =>
-	res.render('oauth-error-callback', { error: { message: errorMessage } });
-
-/**
- * GET /oauth2-credential/callback
- *
- * Verify and store app code. Generate access tokens and store for respective credential.
- */
-
-oauth2CredentialController.get(
-	'/callback',
-	async (req: OAuthRequest.OAuth2Credential.Callback, res: express.Response) => {
+	/**
+	 * Verify and store app code. Generate access tokens and store for respective credential.
+	 */
+	@Get('/callback')
+	async handleCallback(req: OAuthRequest.OAuth2Credential.Callback, res: Response) {
 		try {
 			// realmId it's currently just use for the quickbook OAuth2 flow
 			const { code, state: stateEncoded } = req.query;
 
 			if (!code || !stateEncoded) {
-				return renderCallbackError(
+				return this.renderCallbackError(
 					res,
 					`Insufficient parameters for OAuth2 callback. Received following query parameters: ${JSON.stringify(
 						req.query,
@@ -205,24 +190,24 @@ oauth2CredentialController.get(
 					token: string;
 				};
 			} catch (error) {
-				return renderCallbackError(res, 'Invalid state format returned');
+				return this.renderCallbackError(res, 'Invalid state format returned');
 			}
 
 			const credential = await getCredentialWithoutUser(state.cid);
 
 			if (!credential) {
 				const errorMessage = 'OAuth2 callback failed because of insufficient permissions';
-				LoggerProxy.error(errorMessage, {
+				this.logger.error(errorMessage, {
 					userId: req.user?.id,
 					credentialId: state.cid,
 				});
-				return renderCallbackError(res, errorMessage);
+				return this.renderCallbackError(res, errorMessage);
 			}
 
 			const encryptionKey = await UserSettings.getEncryptionKey();
 
 			const mode: WorkflowExecuteMode = 'internal';
-			const timezone = config.getEnv('generic.timezone');
+			const timezone = this.config.getEnv('generic.timezone');
 			const credentialsHelper = new CredentialsHelper(encryptionKey);
 			const decryptedDataOriginal = await credentialsHelper.getDecrypted(
 				credential as INodeCredentialsDetails,
@@ -244,11 +229,11 @@ oauth2CredentialController.get(
 				!token.verify(decryptedDataOriginal.csrfSecret as string, state.token)
 			) {
 				const errorMessage = 'The OAuth2 callback state is invalid!';
-				LoggerProxy.debug(errorMessage, {
+				this.logger.debug(errorMessage, {
 					userId: req.user?.id,
 					credentialId: state.cid,
 				});
-				return renderCallbackError(res, errorMessage);
+				return this.renderCallbackError(res, errorMessage);
 			}
 
 			let options = {};
@@ -258,7 +243,7 @@ oauth2CredentialController.get(
 				clientSecret: get(oauthCredentials, 'clientSecret', '') as string | undefined,
 				accessTokenUri: get(oauthCredentials, 'accessTokenUrl', '') as string,
 				authorizationUri: get(oauthCredentials, 'authUrl', '') as string,
-				redirectUri: `${getInstanceBaseUrl()}/${restEndpoint}/oauth2-credential/callback`,
+				redirectUri: `${this.baseUrl}/callback`,
 				scopes: split(get(oauthCredentials, 'scope', 'openid,') as string, ','),
 			};
 
@@ -272,7 +257,7 @@ oauth2CredentialController.get(
 				delete oAuth2Parameters.clientSecret;
 			}
 
-			await Container.get(ExternalHooks).run('oauth2.callback', [oAuth2Parameters]);
+			await this.externalHooks.run('oauth2.callback', [oAuth2Parameters]);
 
 			const oAuthObj = new ClientOAuth2(oAuth2Parameters);
 
@@ -289,11 +274,11 @@ oauth2CredentialController.get(
 
 			if (oauthToken === undefined) {
 				const errorMessage = 'Unable to get OAuth2 access tokens!';
-				LoggerProxy.error(errorMessage, {
+				this.logger.error(errorMessage, {
 					userId: req.user?.id,
 					credentialId: state.cid,
 				});
-				return renderCallbackError(res, errorMessage);
+				return this.renderCallbackError(res, errorMessage);
 			}
 
 			if (decryptedDataOriginal.oauthTokenData) {
@@ -318,15 +303,19 @@ oauth2CredentialController.get(
 			// Add special database related data
 			newCredentialsData.updatedAt = new Date();
 			// Save the credentials in DB
-			await Db.collections.Credentials.update(state.cid, newCredentialsData);
-			LoggerProxy.verbose('OAuth2 callback successful for new credential', {
+			await this.credentialsRepository.update(state.cid, newCredentialsData);
+			this.logger.verbose('OAuth2 callback successful for new credential', {
 				userId: req.user?.id,
 				credentialId: state.cid,
 			});
 
-			return res.sendFile(pathResolve(TEMPLATES_DIR, 'oauth-callback.html'));
+			return res.sendFile(resolve(TEMPLATES_DIR, 'oauth-callback.html'));
 		} catch (error) {
-			return renderCallbackError(res, (error as Error).message);
+			return this.renderCallbackError(res, (error as Error).message);
 		}
-	},
-);
+	}
+
+	private renderCallbackError(res: Response, errorMessage: string) {
+		res.render('oauth-error-callback', { error: { message: errorMessage } });
+	}
+}
