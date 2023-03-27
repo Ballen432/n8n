@@ -86,7 +86,7 @@ const mockNodeTypes: INodeTypes = {
 
 export class CredentialsHelper extends ICredentialsHelper {
 	constructor(
-		encryptionKey: string,
+		readonly encryptionKey: string,
 		private credentialTypes = Container.get(CredentialTypes),
 		private nodeTypes = Container.get(NodeTypes),
 	) {
@@ -737,36 +737,6 @@ export class CredentialsHelper extends ICredentialsHelper {
 			message: 'Connection successful!',
 		};
 	}
-}
-
-/**
- * Get a credential if it has been shared with a user.
- */
-export async function getCredentialForUser(
-	credentialId: string,
-	user: User,
-): Promise<ICredentialsDb | null> {
-	const sharedCredential = await Db.collections.SharedCredentials.findOne({
-		relations: ['credentials'],
-		where: whereClause({
-			user,
-			entityType: 'credentials',
-			entityId: credentialId,
-		}),
-	});
-
-	if (!sharedCredential) return null;
-
-	return sharedCredential.credentials as ICredentialsDb;
-}
-
-/**
- * Get a credential without user check
- */
-export async function getCredentialWithoutUser(
-	credentialId: string,
-): Promise<ICredentialsDb | null> {
-	return Db.collections.Credentials.findOneBy({ id: credentialId });
 }
 
 export function createCredentialsFromCredentialsEntity(

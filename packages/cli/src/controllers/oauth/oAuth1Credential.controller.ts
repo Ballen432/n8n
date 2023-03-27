@@ -8,38 +8,34 @@ import { resolve } from 'path';
 import { createHmac } from 'crypto';
 import { ILogger } from 'n8n-workflow';
 import type { INodeCredentialsDetails, WorkflowExecuteMode } from 'n8n-workflow';
-import { Credentials, UserSettings } from 'n8n-core';
+import { Credentials } from 'n8n-core';
 import { Config } from '@/config';
 import { RESPONSE_ERROR_MESSAGES, TEMPLATES_DIR } from '@/constants';
-import {
-	CredentialsHelper,
-	getCredentialForUser,
-	getCredentialWithoutUser,
-} from '@/CredentialsHelper';
+import { CredentialsHelper } from '@/CredentialsHelper';
+import type { SharedCredentials } from '@db/entities/SharedCredentials';
 import { Get, RestController } from '@/decorators';
 import type { ICredentialsDb } from '@/Interfaces';
 import { IExternalHooksClass } from '@/Interfaces';
 import { OAuthRequest } from '@/requests';
 import {
 	BadRequestError,
-	InternalServerError,
 	NotFoundError,
 	sendErrorResponse,
 	ServiceUnavailableError,
 } from '@/ResponseHelper';
-import { getWebhookBaseUrl } from '@/WebhookHelpers';
+import { AbstractOAuthController } from './abstractOAuth.controller';
 
 @RestController('/oauth1-credential')
-export class OAuth1CredentialController {
-	private baseUrl: string;
-
+export class OAuth1CredentialController extends AbstractOAuthController {
 	constructor(
-		private config: Config,
+		config: Config,
 		private logger: ILogger,
+		private credentialsHelper: CredentialsHelper,
 		private externalHooks: IExternalHooksClass,
-		private credentialsRepository: Repository<ICredentialsDb>,
+		credentialsRepository: Repository<ICredentialsDb>,
+		sharedCredentialsRepository: Repository<SharedCredentials>,
 	) {
-		this.baseUrl = `${getWebhookBaseUrl()}/${config.getEnv('endpoints.rest')}/oauth1-credential`;
+		super(1, config, credentialsRepository, sharedCredentialsRepository);
 	}
 
 	/**
@@ -50,11 +46,10 @@ export class OAuth1CredentialController {
 		const { id: credentialId } = req.query;
 
 		if (!credentialId) {
-			this.logger.error('OAuth1 credential authorization failed due to missing credential ID');
 			throw new BadRequestError('Required credential ID is missing');
 		}
 
-		const credential = await getCredentialForUser(credentialId, req.user);
+		const credential = await this.getCredentialForUser(credentialId, req.user);
 
 		if (!credential) {
 			this.logger.error(
@@ -64,29 +59,22 @@ export class OAuth1CredentialController {
 			throw new NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
 		}
 
-		let encryptionKey: string;
-		try {
-			encryptionKey = await UserSettings.getEncryptionKey();
-		} catch (error) {
-			throw new InternalServerError((error as Error).message);
-		}
+		const credentialType = credential.type;
 
 		const mode: WorkflowExecuteMode = 'internal';
-		const timezone = this.config.getEnv('generic.timezone');
-		const credentialsHelper = new CredentialsHelper(encryptionKey);
-		const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-			credential as INodeCredentialsDetails,
-			credential.type,
+		const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
+			credential,
+			credentialType,
 			mode,
-			timezone,
+			this.timezone,
 			true,
 		);
 
-		const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+		const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
 			decryptedDataOriginal,
-			credential.type,
+			credentialType,
 			mode,
-			timezone,
+			this.timezone,
 		);
 
 		const signatureMethod = oauthCredentials.signatureMethod as string;
@@ -138,13 +126,9 @@ export class OAuth1CredentialController {
 		}`;
 
 		// Encrypt the data
-		const credentials = new Credentials(
-			credential as INodeCredentialsDetails,
-			credential.type,
-			credential.nodesAccess,
-		);
+		const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
 
-		credentials.setData(decryptedDataOriginal, encryptionKey);
+		credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
 		const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
 
 		// Add special database related data
@@ -182,7 +166,7 @@ export class OAuth1CredentialController {
 				return sendErrorResponse(res, errorResponse);
 			}
 
-			const credential = await getCredentialWithoutUser(credentialId);
+			const credential = await this.getCredentialWithoutUser(credentialId);
 
 			if (!credential) {
 				this.logger.error('OAuth1 callback failed because of insufficient user permissions', {
@@ -193,28 +177,21 @@ export class OAuth1CredentialController {
 				return sendErrorResponse(res, errorResponse);
 			}
 
-			let encryptionKey: string;
-			try {
-				encryptionKey = await UserSettings.getEncryptionKey();
-			} catch (error) {
-				throw new InternalServerError((error as Error).message);
-			}
+			const credentialType = credential.type;
 
 			const mode: WorkflowExecuteMode = 'internal';
-			const timezone = this.config.getEnv('generic.timezone');
-			const credentialsHelper = new CredentialsHelper(encryptionKey);
-			const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-				credential as INodeCredentialsDetails,
-				credential.type,
+			const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
+				credential,
+				credentialType,
 				mode,
-				timezone,
+				this.timezone,
 				true,
 			);
-			const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+			const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
 				decryptedDataOriginal,
-				credential.type,
+				credentialType,
 				mode,
-				timezone,
+				this.timezone,
 			);
 
 			const options: AxiosRequestConfig = {
@@ -247,12 +224,8 @@ export class OAuth1CredentialController {
 
 			decryptedDataOriginal.oauthTokenData = oauthTokenJson;
 
-			const credentials = new Credentials(
-				credential as INodeCredentialsDetails,
-				credential.type,
-				credential.nodesAccess,
-			);
-			credentials.setData(decryptedDataOriginal, encryptionKey);
+			const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
+			credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
 			const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
 			// Add special database related data
 			newCredentialsData.updatedAt = new Date();

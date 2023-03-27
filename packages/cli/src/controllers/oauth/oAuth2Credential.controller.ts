@@ -8,7 +8,7 @@ import set from 'lodash.set';
 import split from 'lodash.split';
 import unset from 'lodash.unset';
 import { resolve } from 'path';
-import { Credentials, UserSettings } from 'n8n-core';
+import { Credentials } from 'n8n-core';
 import type {
 	ICredentialsEncrypted,
 	INodeCredentialsDetails,
@@ -18,28 +18,25 @@ import { ILogger } from 'n8n-workflow';
 import { RESPONSE_ERROR_MESSAGES, TEMPLATES_DIR } from '@/constants';
 import { Config } from '@/config';
 import { Get, RestController } from '@/decorators';
-import {
-	CredentialsHelper,
-	getCredentialForUser,
-	getCredentialWithoutUser,
-} from '@/CredentialsHelper';
+import type { SharedCredentials } from '@db/entities/SharedCredentials';
+import { CredentialsHelper } from '@/CredentialsHelper';
 import { OAuthRequest } from '@/requests';
-import { getInstanceBaseUrl } from '@/UserManagement/UserManagementHelper';
-import { BadRequestError, InternalServerError, NotFoundError } from '@/ResponseHelper';
+import { BadRequestError, NotFoundError } from '@/ResponseHelper';
 import { IExternalHooksClass } from '@/Interfaces';
 import type { ICredentialsDb } from '@/Interfaces';
+import { AbstractOAuthController } from './abstractOAuth.controller';
 
 @RestController('/oauth2-credential')
-export class OAuth2CredentialController {
-	private baseUrl: string;
-
+export class OAuth2CredentialController extends AbstractOAuthController {
 	constructor(
-		private config: Config,
+		config: Config,
 		private logger: ILogger,
+		private credentialsHelper: CredentialsHelper,
 		private externalHooks: IExternalHooksClass,
-		private credentialsRepository: Repository<ICredentialsDb>,
+		credentialsRepository: Repository<ICredentialsDb>,
+		sharedCredentialsRepository: Repository<SharedCredentials>,
 	) {
-		this.baseUrl = `${getInstanceBaseUrl()}/${config.getEnv('endpoints.rest')}/oauth2-credential`;
+		super(2, config, credentialsRepository, sharedCredentialsRepository);
 	}
 
 	/**
@@ -53,7 +50,7 @@ export class OAuth2CredentialController {
 			throw new BadRequestError('Required credential ID is missing');
 		}
 
-		const credential = await getCredentialForUser(credentialId, req.user);
+		const credential = await this.getCredentialForUser(credentialId, req.user);
 
 		if (!credential) {
 			this.logger.error('Failed to authorize OAuth2 due to lack of permissions', {
@@ -63,23 +60,14 @@ export class OAuth2CredentialController {
 			throw new NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
 		}
 
-		let encryptionKey: string;
-		try {
-			encryptionKey = await UserSettings.getEncryptionKey();
-		} catch (error) {
-			throw new InternalServerError((error as Error).message);
-		}
-
-		const credentialType = (credential as unknown as ICredentialsEncrypted).type;
+		const credentialType = credential.type;
 
 		const mode: WorkflowExecuteMode = 'internal';
-		const timezone = this.config.getEnv('generic.timezone');
-		const credentialsHelper = new CredentialsHelper(encryptionKey);
-		const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-			credential as INodeCredentialsDetails,
+		const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
+			credential,
 			credentialType,
 			mode,
-			timezone,
+			this.timezone,
 			true,
 		);
 
@@ -95,11 +83,11 @@ export class OAuth2CredentialController {
 			delete decryptedDataOriginal.scope;
 		}
 
-		const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+		const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
 			decryptedDataOriginal,
 			credentialType,
 			mode,
-			timezone,
+			this.timezone,
 		);
 
 		const token = new Csrf();
@@ -126,17 +114,14 @@ export class OAuth2CredentialController {
 		const oAuthObj = new ClientOAuth2(oAuthOptions);
 
 		// Encrypt the data
-		const credentials = new Credentials(
-			credential as INodeCredentialsDetails,
-			credentialType,
-			(credential as unknown as ICredentialsEncrypted).nodesAccess,
-		);
+		const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
 		decryptedDataOriginal.csrfSecret = csrfSecret;
 
-		credentials.setData(decryptedDataOriginal, encryptionKey);
+		credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
 		const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
 
 		// Add special database related data
+		// TODO: set this in getDataToSave
 		newCredentialsData.updatedAt = new Date();
 
 		// Update the credentials in DB
@@ -146,9 +131,9 @@ export class OAuth2CredentialController {
 		let returnUri = oAuthObj.code.getUri();
 
 		// if scope uses comma, change it as the library always return then with spaces
-		if ((get(oauthCredentials, 'scope') as string).includes(',')) {
+		const scope = get(oauthCredentials, 'scope') as string;
+		if (scope?.includes(',')) {
 			const data = returnUri.split('?')[1];
-			const scope = get(oauthCredentials, 'scope') as string;
 			const percentEncoded = [data, `scope=${encodeURIComponent(scope)}`].join('&');
 			returnUri = `${get(oauthCredentials, 'authUrl', '') as string}?${percentEncoded}`;
 		}
@@ -193,7 +178,7 @@ export class OAuth2CredentialController {
 				return this.renderCallbackError(res, 'Invalid state format returned');
 			}
 
-			const credential = await getCredentialWithoutUser(state.cid);
+			const credential = await this.getCredentialWithoutUser(state.cid);
 
 			if (!credential) {
 				const errorMessage = 'OAuth2 callback failed because of insufficient permissions';
@@ -204,23 +189,21 @@ export class OAuth2CredentialController {
 				return this.renderCallbackError(res, errorMessage);
 			}
 
-			const encryptionKey = await UserSettings.getEncryptionKey();
+			const credentialType = credential.type;
 
 			const mode: WorkflowExecuteMode = 'internal';
-			const timezone = this.config.getEnv('generic.timezone');
-			const credentialsHelper = new CredentialsHelper(encryptionKey);
-			const decryptedDataOriginal = await credentialsHelper.getDecrypted(
-				credential as INodeCredentialsDetails,
-				(credential as unknown as ICredentialsEncrypted).type,
+			const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
+				credential,
+				credentialType,
 				mode,
-				timezone,
+				this.timezone,
 				true,
 			);
-			const oauthCredentials = credentialsHelper.applyDefaultsAndOverwrites(
+			const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
 				decryptedDataOriginal,
-				(credential as unknown as ICredentialsEncrypted).type,
+				credentialType,
 				mode,
-				timezone,
+				this.timezone,
 			);
 
 			const token = new Csrf();
@@ -293,12 +276,8 @@ export class OAuth2CredentialController {
 			// eslint-disable-next-line @typescript-eslint/no-unsafe-call
 			unset(decryptedDataOriginal, 'csrfSecret');
 
-			const credentials = new Credentials(
-				credential as INodeCredentialsDetails,
-				(credential as unknown as ICredentialsEncrypted).type,
-				(credential as unknown as ICredentialsEncrypted).nodesAccess,
-			);
-			credentials.setData(decryptedDataOriginal, encryptionKey);
+			const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
+			credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
 			const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
 			// Add special database related data
 			newCredentialsData.updatedAt = new Date();
