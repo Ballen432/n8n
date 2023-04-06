@@ -51,7 +51,6 @@ import type { CredentialsEntity } from '@db/entities/CredentialsEntity';
 import { NodeTypes } from '@/NodeTypes';
 import { CredentialTypes } from '@/CredentialTypes';
 import { CredentialsOverwrites } from '@/CredentialsOverwrites';
-import { whereClause } from './UserManagement/UserManagementHelper';
 import { RESPONSE_ERROR_MESSAGES } from './constants';
 import { Container } from 'typedi';
 
@@ -217,7 +216,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 	/**
 	 * Resolves the given value in case it is an expression
 	 */
-	resolveValue(
+	private resolveValue(
 		parameterValue: string,
 		additionalKeys: IWorkflowDataProxyAdditionalKeys,
 		workflow: Workflow,
@@ -254,9 +253,6 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 	/**
 	 * Returns the credentials instance
-	 *
-	 * @param {INodeCredentialsDetails} nodeCredential id and name to return instance of
-	 * @param {string} type Type of the credential to return instance of
 	 */
 	async getCredentials(
 		nodeCredential: INodeCredentialsDetails,
@@ -290,8 +286,6 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 	/**
 	 * Returns all the properties of the credentials with the given name
-	 *
-	 * @param {string} type The name of the type to return credentials off
 	 */
 	getCredentialsProperties(type: string): INodeProperties[] {
 		const credentialTypeData = this.credentialTypes.getByName(type);
@@ -333,10 +327,6 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 	/**
 	 * Returns the decrypted credential data with applied overwrites
-	 *
-	 * @param {INodeCredentialsDetails} nodeCredentials id and name to return instance of
-	 * @param {string} type Type of the credentials to return data of
-	 * @param {boolean} [raw] Return the data as supplied without defaults or overwrites
 	 */
 	async getDecrypted(
 		nodeCredentials: INodeCredentialsDetails,
@@ -365,6 +355,7 @@ export class CredentialsHelper extends ICredentialsHelper {
 	/**
 	 * Applies credential default data and overwrites
 	 */
+	// TODO: move to packages/cli/src/controllers/oauth/abstractOAuth.controller.ts
 	applyDefaultsAndOverwrites(
 		decryptedDataOriginal: ICredentialDataDecryptedObject,
 		type: string,
@@ -441,10 +432,6 @@ export class CredentialsHelper extends ICredentialsHelper {
 
 	/**
 	 * Updates credentials in the database
-	 *
-	 * @param {string} name Name of the credentials to set data of
-	 * @param {string} type Type of the credentials to set data of
-	 * @param {ICredentialDataDecryptedObject} data The data to set
 	 */
 	async updateCredentials(
 		nodeCredentials: INodeCredentialsDetails,

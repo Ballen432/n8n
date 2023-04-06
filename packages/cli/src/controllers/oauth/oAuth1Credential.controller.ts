@@ -7,8 +7,6 @@ import clientOAuth1 from 'oauth-1.0a';
 import { resolve } from 'path';
 import { createHmac } from 'crypto';
 import { ILogger } from 'n8n-workflow';
-import type { INodeCredentialsDetails, WorkflowExecuteMode } from 'n8n-workflow';
-import { Credentials } from 'n8n-core';
 import { Config } from '@/config';
 import { RESPONSE_ERROR_MESSAGES, TEMPLATES_DIR } from '@/constants';
 import { CredentialsHelper } from '@/CredentialsHelper';
@@ -17,25 +15,20 @@ import { Get, RestController } from '@/decorators';
 import type { ICredentialsDb } from '@/Interfaces';
 import { IExternalHooksClass } from '@/Interfaces';
 import { OAuthRequest } from '@/requests';
-import {
-	BadRequestError,
-	NotFoundError,
-	sendErrorResponse,
-	ServiceUnavailableError,
-} from '@/ResponseHelper';
+import { NotFoundError, sendErrorResponse, ServiceUnavailableError } from '@/ResponseHelper';
 import { AbstractOAuthController } from './abstractOAuth.controller';
 
 @RestController('/oauth1-credential')
 export class OAuth1CredentialController extends AbstractOAuthController {
 	constructor(
 		config: Config,
-		private logger: ILogger,
-		private credentialsHelper: CredentialsHelper,
+		logger: ILogger,
+		credentialsHelper: CredentialsHelper,
 		private externalHooks: IExternalHooksClass,
 		credentialsRepository: Repository<ICredentialsDb>,
 		sharedCredentialsRepository: Repository<SharedCredentials>,
 	) {
-		super(1, config, credentialsRepository, sharedCredentialsRepository);
+		super(1, config, logger, credentialsHelper, credentialsRepository, sharedCredentialsRepository);
 	}
 
 	/**
@@ -43,39 +36,9 @@ export class OAuth1CredentialController extends AbstractOAuthController {
 	 */
 	@Get('/auth')
 	async getAuthUri(req: OAuthRequest.OAuth1Credential.Auth): Promise<string> {
-		const { id: credentialId } = req.query;
-
-		if (!credentialId) {
-			throw new BadRequestError('Required credential ID is missing');
-		}
-
-		const credential = await this.getCredentialForUser(credentialId, req.user);
-
-		if (!credential) {
-			this.logger.error(
-				'OAuth1 credential authorization failed because the current user does not have the correct permissions',
-				{ userId: req.user.id },
-			);
-			throw new NotFoundError(RESPONSE_ERROR_MESSAGES.NO_CREDENTIAL);
-		}
-
-		const credentialType = credential.type;
-
-		const mode: WorkflowExecuteMode = 'internal';
-		const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
-			credential,
-			credentialType,
-			mode,
-			this.timezone,
-			true,
-		);
-
-		const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
-			decryptedDataOriginal,
-			credentialType,
-			mode,
-			this.timezone,
-		);
+		const credential = await this.getCredential(req);
+		const decryptedDataOriginal = await this.getDecryptedData(credential);
+		const oauthCredentials = this.applyDefaultsAndOverwrites(credential, decryptedDataOriginal);
 
 		const signatureMethod = oauthCredentials.signatureMethod as string;
 
@@ -93,7 +56,7 @@ export class OAuth1CredentialController extends AbstractOAuthController {
 		};
 
 		const oauthRequestData = {
-			oauth_callback: `${this.baseUrl}/callback?cid=${credentialId}`,
+			oauth_callback: `${this.baseUrl}/callback?cid=${credential.id}`,
 		};
 
 		await this.externalHooks.run('oauth1.authenticate', [oAuthOptions, oauthRequestData]);
@@ -125,21 +88,11 @@ export class OAuth1CredentialController extends AbstractOAuthController {
 			responseJson.oauth_token
 		}`;
 
-		// Encrypt the data
-		const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
-
-		credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
-		const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
-
-		// Add special database related data
-		newCredentialsData.updatedAt = new Date();
-
-		// Update the credentials in DB
-		await this.credentialsRepository.update(credentialId, newCredentialsData);
+		await this.encryptAndSaveData(credential, decryptedDataOriginal);
 
 		this.logger.verbose('OAuth1 authorization successful for new credential', {
 			userId: req.user.id,
-			credentialId,
+			credentialId: credential.id,
 		});
 
 		return returnUri;
@@ -177,22 +130,8 @@ export class OAuth1CredentialController extends AbstractOAuthController {
 				return sendErrorResponse(res, errorResponse);
 			}
 
-			const credentialType = credential.type;
-
-			const mode: WorkflowExecuteMode = 'internal';
-			const decryptedDataOriginal = await this.credentialsHelper.getDecrypted(
-				credential,
-				credentialType,
-				mode,
-				this.timezone,
-				true,
-			);
-			const oauthCredentials = this.credentialsHelper.applyDefaultsAndOverwrites(
-				decryptedDataOriginal,
-				credentialType,
-				mode,
-				this.timezone,
-			);
+			const decryptedDataOriginal = await this.getDecryptedData(credential);
+			const oauthCredentials = this.applyDefaultsAndOverwrites(credential, decryptedDataOriginal);
 
 			const options: AxiosRequestConfig = {
 				method: 'POST',
@@ -224,13 +163,7 @@ export class OAuth1CredentialController extends AbstractOAuthController {
 
 			decryptedDataOriginal.oauthTokenData = oauthTokenJson;
 
-			const credentials = new Credentials(credential, credentialType, credential.nodesAccess);
-			credentials.setData(decryptedDataOriginal, this.credentialsHelper.encryptionKey);
-			const newCredentialsData = credentials.getDataToSave() as unknown as ICredentialsDb;
-			// Add special database related data
-			newCredentialsData.updatedAt = new Date();
-			// Save the credentials in DB
-			await this.credentialsRepository.update(credentialId, newCredentialsData);
+			await this.encryptAndSaveData(credential, decryptedDataOriginal);
 
 			this.logger.verbose('OAuth1 callback successful for new credential', {
 				userId: req.user?.id,

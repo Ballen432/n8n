@@ -75,7 +75,7 @@ describe('OAuth2CredentialController', () => {
 			const req = mock<OAuthRequest.OAuth2Credential.Auth>({ user, query: { id: '1' } });
 			sharedCredentialsRepository.findOne.mockResolvedValueOnce(
 				mock<SharedCredentials>({
-					credentials: { type: 'googleDriveOAuth2Api' },
+					credentials: { id: '1', type: 'googleDriveOAuth2Api' },
 				}),
 			);
 			credentialsHelper.getDecrypted.mockResolvedValueOnce({});
