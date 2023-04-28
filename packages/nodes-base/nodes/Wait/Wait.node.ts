@@ -857,10 +857,12 @@ export class Wait implements INodeType {
 		if (waitValue < 65000) {
 			// If wait time is shorter than 65 seconds leave execution active because
 			// we just check the database every 60 seconds.
-			return new Promise((resolve, _reject) => {
-				setTimeout(() => {
-					resolve([this.getInputData()]);
-				}, waitValue);
+			return new Promise((resolve, reject) => {
+				const timer = setTimeout(() => resolve([this.getInputData()]), waitValue);
+				this.onExecutionCancellation(() => {
+					clearTimeout(timer);
+					reject(new Error('Execution cancelled'));
+				});
 			});
 		}
 
