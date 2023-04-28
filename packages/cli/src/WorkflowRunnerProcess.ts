@@ -279,12 +279,13 @@ class WorkflowRunnerProcess {
 
 			return returnData!.data!.main;
 		};
-
+		const abortController = new AbortController();
 		if (this.data.executionData !== undefined) {
 			this.workflowExecute = new WorkflowExecute(
 				additionalData,
 				this.data.executionMode,
 				this.data.executionData,
+				abortController,
 			);
 			return this.workflowExecute.processRunExecutionData(this.workflow);
 		}
@@ -305,7 +306,12 @@ class WorkflowRunnerProcess {
 			}
 
 			// Can execute without webhook so go on
-			this.workflowExecute = new WorkflowExecute(additionalData, this.data.executionMode);
+			this.workflowExecute = new WorkflowExecute(
+				additionalData,
+				this.data.executionMode,
+				undefined,
+				abortController,
+			);
 			return this.workflowExecute.run(
 				this.workflow,
 				startNode,
@@ -314,7 +320,12 @@ class WorkflowRunnerProcess {
 			);
 		}
 		// Execute only the nodes between start and destination nodes
-		this.workflowExecute = new WorkflowExecute(additionalData, this.data.executionMode);
+		this.workflowExecute = new WorkflowExecute(
+			additionalData,
+			this.data.executionMode,
+			undefined,
+			abortController,
+		);
 		return this.workflowExecute.runPartialWorkflow(
 			this.workflow,
 			this.data.runData,

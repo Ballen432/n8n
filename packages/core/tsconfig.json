@@ -2,6 +2,7 @@
 	"extends": "../../tsconfig.json",
 	"compilerOptions": {
 		"rootDir": ".",
+		"lib": ["dom", "es2020", "es2022.error"],
 		"types": ["node", "jest"],
 		"composite": true,
 		"noEmit": true,

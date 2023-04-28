@@ -1152,6 +1152,7 @@ export class Workflow {
 		additionalData: IWorkflowExecuteAdditionalData,
 		nodeExecuteFunctions: INodeExecuteFunctions,
 		mode: WorkflowExecuteMode,
+		abortController?: AbortController,
 	): Promise<IRunNodeResponse> {
 		const { node } = executionData;
 		let inputData = executionData.data;
@@ -1235,6 +1236,7 @@ export class Workflow {
 					additionalData,
 					executionData,
 					mode,
+					abortController,
 				);
 
 				returnPromises.push(nodeType.executeSingle.call(thisArgs));
@@ -1259,6 +1261,7 @@ export class Workflow {
 				additionalData,
 				executionData,
 				mode,
+				abortController,
 			);
 			return { data: await nodeType.execute.call(thisArgs) };
 		} else if (nodeType.poll) {
@@ -1337,6 +1340,8 @@ export class Workflow {
 					nodeType,
 					executionData,
 					nodeExecuteFunctions,
+					undefined,
+					abortController,
 				),
 			};
 		}

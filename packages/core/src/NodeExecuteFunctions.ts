@@ -2287,9 +2287,14 @@ export function getExecuteFunctions(
 	additionalData: IWorkflowExecuteAdditionalData,
 	executeData: IExecuteData,
 	mode: WorkflowExecuteMode,
+	abortController?: AbortController,
 ): IExecuteFunctions {
 	return ((workflow, runExecutionData, connectionInputData, inputData, node) => {
 		return {
+			onExecutionCancellation: (handler) => {
+				abortController?.signal?.addEventListener('abort', handler);
+				// TODO: clear out event listeners
+			},
 			...getCommonWorkflowFunctions(workflow, node, additionalData),
 			getMode: () => mode,
 			getCredentials: async (type, itemIndex) =>
@@ -2472,9 +2477,14 @@ export function getExecuteSingleFunctions(
 	additionalData: IWorkflowExecuteAdditionalData,
 	executeData: IExecuteData,
 	mode: WorkflowExecuteMode,
+	abortController?: AbortController,
 ): IExecuteSingleFunctions {
 	return ((workflow, runExecutionData, connectionInputData, inputData, node, itemIndex) => {
 		return {
+			onExecutionCancellation: (handler) => {
+				abortController?.signal?.addEventListener('abort', handler);
+				// TODO: clear out event listeners
+			},
 			...getCommonWorkflowFunctions(workflow, node, additionalData),
 			continueOnFail: () => continueOnFail(node),
 			evaluateExpression: (expression: string, evaluateItemIndex: number | undefined) => {

@@ -191,6 +191,7 @@ export class Worker extends BaseCommand {
 			LoggerProxy.debug(`Queued worker execution status for ${executionId} is "${status}"`);
 		};
 
+		// TODO: setup AbortController
 		let workflowExecute: WorkflowExecute;
 		let workflowRun: PCancelable<IRun>;
 		if (currentExecutionDb.data !== undefined) {
