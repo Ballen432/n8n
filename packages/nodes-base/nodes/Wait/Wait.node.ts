@@ -859,10 +859,7 @@ export class Wait implements INodeType {
 			// we just check the database every 60 seconds.
 			return new Promise((resolve, reject) => {
 				const timer = setTimeout(() => resolve([this.getInputData()]), waitValue);
-				this.onExecutionCancellation(() => {
-					clearTimeout(timer);
-					reject(new Error('Execution cancelled'));
-				});
+				this.onExecutionCancellation(async () => clearTimeout(timer), reject);
 			});
 		}
 

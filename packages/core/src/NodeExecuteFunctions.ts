@@ -2048,6 +2048,19 @@ const getCommonWorkflowFunctions = (
 	getTimezone: () => getTimezone(workflow, additionalData),
 });
 
+const executionCancellationFunctions = (
+	abortController?: AbortController,
+): Pick<IExecuteFunctions, 'onExecutionCancellation'> => ({
+	onExecutionCancellation: (cleanup, reject) => {
+		const handler = async () => {
+			abortController?.signal?.removeEventListener('abort', handler);
+			await cleanup();
+			reject?.(new Error('Execution cancelled'));
+		};
+		abortController?.signal?.addEventListener('abort', handler);
+	},
+});
+
 const getRequestHelperFunctions = (
 	workflow: Workflow,
 	node: INode,
@@ -2291,11 +2304,8 @@ export function getExecuteFunctions(
 ): IExecuteFunctions {
 	return ((workflow, runExecutionData, connectionInputData, inputData, node) => {
 		return {
-			onExecutionCancellation: (handler) => {
-				abortController?.signal?.addEventListener('abort', handler);
-				// TODO: clear out event listeners
-			},
 			...getCommonWorkflowFunctions(workflow, node, additionalData),
+			...executionCancellationFunctions(abortController),
 			getMode: () => mode,
 			getCredentials: async (type, itemIndex) =>
 				getCredentials(
@@ -2481,11 +2491,8 @@ export function getExecuteSingleFunctions(
 ): IExecuteSingleFunctions {
 	return ((workflow, runExecutionData, connectionInputData, inputData, node, itemIndex) => {
 		return {
-			onExecutionCancellation: (handler) => {
-				abortController?.signal?.addEventListener('abort', handler);
-				// TODO: clear out event listeners
-			},
 			...getCommonWorkflowFunctions(workflow, node, additionalData),
+			...executionCancellationFunctions(abortController),
 			continueOnFail: () => continueOnFail(node),
 			evaluateExpression: (expression: string, evaluateItemIndex: number | undefined) => {
 				evaluateItemIndex = evaluateItemIndex === undefined ? itemIndex : evaluateItemIndex;

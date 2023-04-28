@@ -746,7 +746,7 @@ type BaseExecutionFunctions = FunctionsBaseWithRequiredKeys<'getMode'> & {
 	getExecuteData(): IExecuteData;
 	getWorkflowDataProxy(itemIndex: number): IWorkflowDataProxyData;
 	getInputSourceData(inputIndex?: number, inputName?: string): ISourceData;
-	onExecutionCancellation(handler: () => void): void;
+	onExecutionCancellation(cleanup: () => Promise<void>, reject: (reason: Error) => void): void;
 };
 
 export type IExecuteFunctions = ExecuteFunctions.GetNodeParameterFn &
