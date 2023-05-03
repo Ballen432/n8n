@@ -1,13 +1,13 @@
 import { mock } from 'jest-mock-extended';
-import { ILogger } from 'n8n-workflow';
-import { Repository } from 'typeorm';
-import { Config } from '@/config';
+import type { ILogger } from 'n8n-workflow';
+import type { Repository } from 'typeorm';
+import type { Config } from '@/config';
 import { OAuth2CredentialController } from '@/controllers';
 import type { SharedCredentials } from '@db/entities/SharedCredentials';
 import type { User } from '@db/entities/User';
-import { CredentialsHelper } from '@/CredentialsHelper';
-import { ICredentialsDb, IExternalHooksClass } from '@/Interfaces';
-import { OAuthRequest } from '@/requests';
+import type { CredentialsHelper } from '@/CredentialsHelper';
+import type { ICredentialsDb, IExternalHooksClass } from '@/Interfaces';
+import type { OAuthRequest } from '@/requests';
 import { BadRequestError, NotFoundError } from '@/ResponseHelper';
 
 jest.mock('crypto-js', () => ({
@@ -23,6 +23,7 @@ jest.mock(
 			secretSync() {
 				return 'csrf-secret';
 			}
+
 			create() {
 				return 'token';
 			}
